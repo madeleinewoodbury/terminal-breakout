@@ -50,6 +50,18 @@ the wall. A ball that gets past the paddle costs a life.
 
 ## The paddle
 
+Tap Left or Right to nudge the paddle 3 columns. Hold it down and the paddle
+glides at a steady 60 columns a second — across the whole field in under a
+second — and stops as soon as you let go.
+
+Terminals only report key presses, not releases, so the game treats a key as
+held while the terminal's key repeat keeps arriving. That means there is one
+short pause after the first nudge, before the glide starts: that is your
+system's "delay until repeat" setting. If it feels sluggish, shorten it (on
+macOS: System Settings → Keyboard → Delay until repeat; on Linux it lives in
+your desktop's keyboard settings, or `xset r rate 200 30` under X11). The
+glide speed itself does not depend on the repeat rate.
+
 Where the ball lands on the paddle sets its angle on the way back up:
 
 | Part of paddle | Ball goes |
@@ -97,7 +109,7 @@ floor from level 9. `-l` starts you higher, with the armour and speed of that
 level.
 
 Tuning constants live at the top of `breakout.py`: `BRICK_COLS`, `BRICK_ROWS`,
-`HEIGHT`, `PADDLE_W`, `PADDLE_STEP`, `START_LIVES`, `MAX_LIVES`,
+`HEIGHT`, `PADDLE_W`, `PADDLE_STEP`, `PADDLE_SPEED`, `START_LIVES`, `MAX_LIVES`,
 `EXTRA_LIFE_EVERY`, `START_TICK_MS`, `MIN_TICK_MS`, `SPEEDUP_MS`,
 `ROW_POINTS` and `PADDLE_ZONES`.
 
@@ -173,6 +185,10 @@ A few details in `_loop()` are load-bearing and easy to undo by accident:
 - `curses` `timeout()` overrides `nodelay()`, so the input drain loop re-arms
   `nodelay` on every pass. Without it a steady stream of keypresses never lets
   the buffer empty and the game stops advancing.
+- While a key is held, the loop wakes every `GLIDE_FRAME_MS` rather than only
+  at the next ball tick, so the paddle is redrawn as it glides. The `Glide`
+  class turns key presses into that motion; like `Game` it never touches
+  curses and is driven by timestamps, so it can be tested without a terminal.
 - The tick is rescheduled on launch, so a freshly served ball gets a full tick
   before it first moves rather than whatever was left over.
 

@@ -24,7 +24,13 @@ HEIGHT = 20
 BRICK_TOP = 2              # empty rows above the wall, so the ball can get behind it
 BRICK_ROWS = 6
 PADDLE_W = 8
-PADDLE_STEP = 2            # columns per keypress
+PADDLE_STEP = 3            # columns a single tap moves the paddle
+# Holding a key glides the paddle at this speed instead of hopping once per
+# key-repeat event. Curses only sees key presses, never releases, so a hold
+# is inferred from repeats arriving: see Glide.
+PADDLE_SPEED = 60          # columns per second while a key is held
+GLIDE_FRAME_MS = 10        # how often a gliding paddle is redrawn
+MAX_REPEAT_GAP_MS = 150    # a longer silence than this means the key is up
 
 START_LIVES = 3
 MAX_LIVES = 5
@@ -447,6 +453,73 @@ ROW_COLORS = [
     curses.COLOR_BLUE,
 ]
 
+class Glide:
+    """Turns a held arrow key into smooth paddle motion. No curses here.
+
+    A terminal sends a held key as a burst of repeats, typically 30 a second
+    after an initial delay, and never says when the key comes up. Moving the
+    paddle once per repeat makes its speed whatever the OS repeat rate is,
+    and steppy with it. Instead, a repeat of the same direction marks the key
+    as held, and while it is held the paddle moves at PADDLE_SPEED on the
+    clock, every frame. The key counts as released once no repeat has come in
+    for one and a half repeat gaps (measured, not assumed, since repeat rates
+    vary), so letting go stops the paddle within a frame or two.
+    """
+
+    def __init__(self):
+        self.stop()
+
+    def stop(self):
+        self.dir = 0
+        self.held = False
+        self.last_key = 0.0
+        self.until = 0.0
+        self.last_frame = 0.0
+        self.carry = 0.0
+
+    def press(self, direction, now):
+        """A left (-1) or right (1) key arrived. Returns columns to move
+        right away: a tap's step on a fresh press, nothing on a repeat,
+        since a held paddle moves on the clock in advance()."""
+        repeat = (direction == self.dir and now <= self.until)
+        if repeat:
+            gap = now - self.last_key
+            if not self.held:
+                self.held = True
+                self.last_frame = now
+                self.carry = 0.0
+            self.until = now + min(gap * 1.5, MAX_REPEAT_GAP_MS / 1000)
+            self.last_key = now
+            return 0
+        # Fresh press. Wait long enough for the OS's first repeat, which
+        # comes after a longer delay than the rest; if it never does, this
+        # was a tap and nothing further moves.
+        self.stop()
+        self.dir = direction
+        self.last_key = now
+        self.until = now + 0.6
+        return direction * PADDLE_STEP
+
+    def advance(self, now):
+        """Columns to move for the time since the last frame."""
+        if not self.held:
+            if self.dir and now > self.until:
+                self.stop()
+            return 0
+        end = min(now, self.until)
+        self.carry += (end - self.last_frame) * PADDLE_SPEED
+        self.last_frame = end
+        cols = int(self.carry)
+        self.carry -= cols
+        if now >= self.until:
+            self.stop()
+        return self.dir * cols
+
+    @property
+    def gliding(self):
+        return self.held
+
+
 HELP = [
     " Left/Right or A/D move  Space/Up launch  P pause",
     " R restart  X save&exit  Q quit",
@@ -591,12 +664,17 @@ def _loop(stdscr, game, colors, high, session):
     """Play until the player quits. True if they saved on the way out."""
     record = False  # did the run now on screen set a new best?
     next_tick = time.monotonic() + game.delay_ms / 1000
+    glide = Glide()
 
     while True:
         # Wait for input only until the next tick is due. getch() returns as
         # soon as a key arrives, so the clock — not the input — decides when
         # the ball moves; otherwise holding an arrow key would speed it up.
         remaining_ms = int((next_tick - time.monotonic()) * 1000)
+        if glide.gliding:
+            # A held paddle moves between key repeats too, so wake up often
+            # enough to draw it gliding rather than hopping.
+            remaining_ms = min(remaining_ms, GLIDE_FRAME_MS)
         stdscr.timeout(max(0, remaining_ms))
         key = stdscr.getch()
 
@@ -621,6 +699,7 @@ def _loop(stdscr, game, colors, high, session):
                         return True
                     game._set_effect("SAVE FAILED")
             elif key in (ord("r"), ord("R")):
+                glide.stop()
                 high.submit(game.score)
                 game.reset()
                 record = False
@@ -628,10 +707,11 @@ def _loop(stdscr, game, colors, high, session):
             elif key in (ord("p"), ord("P")):
                 if game.alive:
                     game.paused = not game.paused
-            elif key in LEFT_KEYS:
-                game.move(-PADDLE_STEP)
-            elif key in RIGHT_KEYS:
-                game.move(PADDLE_STEP)
+            elif key in LEFT_KEYS or key in RIGHT_KEYS:
+                cols = glide.press(-1 if key in LEFT_KEYS else 1,
+                                   time.monotonic())
+                if cols:
+                    game.move(cols)
             elif key in LAUNCH_KEYS:
                 if game.launch():
                     # A full tick before the first move, not the scrap left
@@ -640,6 +720,10 @@ def _loop(stdscr, game, colors, high, session):
             key = stdscr.getch()
 
         now = time.monotonic()
+        cols = glide.advance(now)
+        if cols and game.move(cols):
+            dirty = True
+
         if now >= next_tick:
             game.step()
             next_tick = now + game.delay_ms / 1000
